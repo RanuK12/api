@@ -3,3 +3,4 @@ node_modules/
 *.log
 NOTES.md
 __pycache__/
+.aider*
