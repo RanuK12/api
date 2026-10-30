@@ -9,6 +9,7 @@
 // 2026-09-28): two public round-2 stakes passed every generic check and would have been credited.
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 const WS = process.env.WORKSPACE || path.join(__dirname, '..');
 const SOURCES = {
   ladderEntries: process.env.LADDER_ENTRIES || path.join(WS, 'ladder', 'data', 'entries.json'),
@@ -17,12 +18,14 @@ const SOURCES = {
   cold: path.join(__dirname, 'data', 'cold-addresses.json'),
   inflowLabels: path.join(__dirname, 'data', 'inflow-labels.json'),
   manual: path.join(__dirname, 'data', 'purposes.json'),   // {"hashes": {HASH: "reason"}, "accounts": {nano_...: "reason"}}
+  superteamEarn: process.env.SUPERTEAM_EARN_URL || 'https://earn.superteam.fun/api/wallet/activity'
 };
 const REASONS = {
   'ladder stake': 'this send is a forecast-ladder stake (ladder.pursekeeper.dev); it is committed to that round and is not API credit, whoever presents it',
   'own account': 'this send came from one of pursekeeper\'s own accounts; internal moves are not API credit',
   'funding account': 'this send is booked on the public log as something other than a payment for calls; it is not API credit',
   'donation': 'this send is labelled a donation on the public log; it is not API credit',
+  'superteam earn': 'this send is a payment liquidated in Superteam Earn (firsthand inventory); it is not API credit, whoever presents it'
 };
 // A source that does not exist is an empty source (null). A source that exists and cannot be read or parsed
 // is an error, and load() throws it: building the registry without that file would silently drop every
@@ -34,8 +37,40 @@ const readJson = p => {
   try { return JSON.parse(raw); } catch (e) { throw new Error(p + ': not valid JSON (' + e.message + ')'); }
 };
 const walk = (v, f) => { if (Array.isArray(v)) v.forEach(x => walk(x, f)); else if (v && typeof v === 'object') { f(v); Object.values(v).forEach(x => walk(x, f)); } };
+// Fetch data from Superteam Earn API
+const fetchSuperteamEarn = async (url) => {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { timeout: 5000 }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          if (res.statusCode === 200) {
+            const parsed = JSON.parse(data);
+            resolve(parsed);
+          } else {
+            console.warn(`Superteam Earn API returned status ${res.statusCode}`);
+            resolve([]);
+          }
+        } catch (e) {
+          console.warn(`Failed to parse Superteam Earn API response: ${e.message}`);
+          resolve([]);
+        }
+      });
+    });
+    req.on('error', (e) => {
+      console.warn(`Failed to fetch Superteam Earn API: ${e.message}`);
+      resolve([]);
+    });
+    req.setTimeout(5000, () => {
+      req.destroy();
+      console.warn('Superteam Earn API request timed out');
+      resolve([]);
+    });
+  });
+};
 // Pure: build {hashes: Map<HASH, reason>, accounts: Map<account, reason>} from already-parsed sources.
-function build(src) {
+async function build(src) {
   const hashes = new Map(), accounts = new Map();
   for (const doc of [src.ladderEntries, src.ladderSurplus]) walk(doc, o => { if (typeof o.stake_hash === 'string' && /^[0-9A-F]{64}$/i.test(o.stake_hash)) hashes.set(o.stake_hash.toUpperCase(), REASONS['ladder stake']); });
   walk(src.own, o => { if (typeof o.address === 'string' && o.address.startsWith('nano_')) accounts.set(o.address, REASONS['own account']); });
@@ -53,10 +88,38 @@ function build(src) {
     for (const [h, r] of Object.entries(src.manual.hashes || {})) if (/^[0-9A-F]{64}$/i.test(h)) hashes.set(h.toUpperCase(), String(r));
     for (const [a, r] of Object.entries(src.manual.accounts || {})) if (a.startsWith('nano_')) accounts.set(a, String(r));
   }
+  // Fetch Superteam Earn data and populate hashes/accounts
+  if (src.superteamEarn && typeof src.superteamEarn === 'string') {
+    console.log('Fetching Superteam Earn activity...');
+    try {
+      const activity = await fetchSuperteamEarn(src.superteamEarn);
+      if (Array.isArray(activity)) {
+        for (const item of activity) {
+          if (item.type === 'Credited' && item.signature && typeof item.signature === 'string') {
+            hashes.set(item.signature.toUpperCase(), REASONS['superteam earn']);
+            if (item.counterpartyAddress && typeof item.counterpartyAddress === 'string' && item.counterpartyAddress.startsWith('nano_')) {
+              accounts.set(item.counterpartyAddress, REASONS['superteam earn']);
+            }
+          }
+        }
+        console.log(`Added ${hashes.size} Superteam Earn hashes and ${accounts.size} Superteam Earn accounts to exclusions`);
+      } else {
+        console.warn('Superteam Earn API did not return an array');
+      }
+    } catch (e) {
+      console.warn(`Failed to fetch or process Superteam Earn data: ${e.message}`);
+    }
+  }
   return { hashes, accounts };
 }
-function load() {
-  const src = {}; for (const [k, p] of Object.entries(SOURCES)) src[k] = readJson(p);
+async function load() {
+  const src = {}; for (const [k, p] of Object.entries(SOURCES)) {
+    if (k === 'superteamEarn') {
+      src[k] = p; // URL, not a file
+    } else {
+      src[k] = readJson(p);
+    }
+  }
   return build(src);
 }
 module.exports = { build, load, readJson, REASONS, SOURCES };

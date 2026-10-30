@@ -99,7 +99,7 @@ let purposeRegOk = false;
 let reloading = null;   // one reload at a time; startup awaits the first (Ops Control HQ, 2026-09-28: the async reload raced the first requests)
 function loadPurposes() { return reloading || (reloading = loadPurposesNow().finally(() => { reloading = null; })); }
 async function loadPurposesNow() {
-  try { purposeReg = purposes.load(); purposeRegOk = true; }
+  try { purposeReg = await purposes.load(); purposeRegOk = true; }
   catch (e) { console.error('purposes: registry NOT reloaded (' + e.message + '); ' + (purposeRegOk ? 'keeping the last complete one' : 'bearer credit stays refused until a load succeeds')); if (!purposeRegOk) setTimeout(loadPurposes, 30_000).unref(); return; }
   for (const [h, reason] of purposeReg.hashes) {
     noCredit.set(h, reason);
